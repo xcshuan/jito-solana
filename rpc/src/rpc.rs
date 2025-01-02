@@ -1876,14 +1876,13 @@ impl JsonRpcRequestProcessor {
         Ok(new_response(&bank, supply))
     }
 
-    
     pub fn get_token_holders_number(
         &self,
         mint: &Pubkey,
         commitment: Option<CommitmentConfig>,
     ) -> Result<RpcResponse<u64>> {
         let bank = self.bank(commitment);
-        let (mint_owner, _data) = get_mint_owner_and_additional_data(&bank, &mint)?;
+        let (mint_owner, _data) = get_mint_owner_and_additional_data(&bank, mint)?;
         if !is_known_spl_token_id(&mint_owner) {
             return Err(Error::invalid_params(
                 "Invalid param: not a Token mint".to_string(),
@@ -1891,9 +1890,9 @@ impl JsonRpcRequestProcessor {
         }
 
         let token_balances =
-            self.get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, &mint, vec![], true)?;
+            self.get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, mint, vec![], true)?;
 
-        token_balances
+        let token_holders_count = token_balances
             .iter()
             .filter(|(_, account)| {
                 let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
@@ -1904,7 +1903,7 @@ impl JsonRpcRequestProcessor {
             })
             .count();
 
-        Ok(new_response(&bank, token_balances.len() as u64))
+        Ok(new_response(&bank, token_holders_count as u64))
     }
 
     pub fn get_token_top_holders(
@@ -1914,7 +1913,7 @@ impl JsonRpcRequestProcessor {
         commitment: Option<CommitmentConfig>,
     ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>> {
         let bank = self.bank(commitment);
-        let (mint_owner, data) = get_mint_owner_and_additional_data(&bank, &mint)?;
+        let (mint_owner, data) = get_mint_owner_and_additional_data(&bank, mint)?;
         if !is_known_spl_token_id(&mint_owner) {
             return Err(Error::invalid_params(
                 "Invalid param: not a Token mint".to_string(),
@@ -1929,6 +1928,9 @@ impl JsonRpcRequestProcessor {
                 .map(|account| (account.base.amount, account.base.owner))
                 .unwrap_or((0, Pubkey::default()));
             let new_entry = (amount, owner, address);
+            if amount == 0 {
+                continue;
+            }
             if token_holders.len() >= limit {
                 let Reverse(entry) = token_holders
                     .peek()
