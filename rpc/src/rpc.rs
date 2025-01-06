@@ -1876,6 +1876,49 @@ impl JsonRpcRequestProcessor {
         Ok(new_response(&bank, supply))
     }
 
+    pub fn get_multi_token_holders_number(
+        &self,
+        mints: &[Pubkey],
+        commitment: Option<CommitmentConfig>,
+    ) -> Result<RpcResponse<Vec<u64>>> {
+        if mints.len() > 100 {
+            return Err(Error::invalid_params("Too many mints".to_string()));
+        };
+
+        let bank = self.bank(commitment);
+        let mut token_holders_counts = Vec::with_capacity(mints.len());
+        for mint in mints {
+            let (mint_owner, _data) = get_mint_owner_and_additional_data(&bank, mint)?;
+            if !is_known_spl_token_id(&mint_owner) {
+                return Err(Error::invalid_params(
+                    "Invalid param: not a Token mint".to_string(),
+                ));
+            }
+
+            let token_balances = self.get_filtered_spl_token_accounts_by_mint(
+                &bank,
+                &mint_owner,
+                mint,
+                vec![],
+                true,
+            )?;
+
+            let token_holders_count = token_balances
+                .iter()
+                .filter(|(_, account)| {
+                    let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
+                        .map(|account| account.base.amount)
+                        .unwrap_or(0);
+
+                    amount > 0
+                })
+                .count();
+
+            token_holders_counts.push(token_holders_count as u64);
+        }
+        Ok(new_response(&bank, token_holders_counts))
+    }
+
     pub fn get_token_holders_number(
         &self,
         mint: &Pubkey,
@@ -1912,6 +1955,9 @@ impl JsonRpcRequestProcessor {
         limit: usize,
         commitment: Option<CommitmentConfig>,
     ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>> {
+        if limit > 1000 {
+            return Err(Error::invalid_params("Limit too large".to_string()));
+        };
         let bank = self.bank(commitment);
         let (mint_owner, data) = get_mint_owner_and_additional_data(&bank, mint)?;
         if !is_known_spl_token_id(&mint_owner) {
@@ -3253,6 +3299,14 @@ pub mod rpc_accounts_scan {
             commitment: Option<CommitmentConfig>,
         ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>>;
 
+        #[rpc(meta, name = "getMultiTokenHoldersNumber")]
+        fn get_multi_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_strs: Vec<String>,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<u64>>>;
+
         #[rpc(meta, name = "getTokenHoldersNumber")]
         fn get_token_holders_number(
             &self,
@@ -3340,6 +3394,22 @@ pub mod rpc_accounts_scan {
         ) -> Result<RpcResponse<RpcSupply>> {
             debug!("get_supply rpc request received");
             Ok(meta.get_supply(config)?)
+        }
+
+        fn get_multi_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_strs: Vec<String>,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<u64>>> {
+            debug!(
+                "get_token_holders_number rpc request received: {:?}",
+                mint_strs
+            );
+            let mints = mint_strs.into_iter().map(|mint_str| {
+                verify_pubkey(&mint_str)
+            }).collect::<Result<Vec<Pubkey>>>()?;
+            meta.get_multi_token_holders_number(&mints, commitment)
         }
 
         fn get_token_holders_number(
