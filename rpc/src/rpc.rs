@@ -1876,6 +1876,134 @@ impl JsonRpcRequestProcessor {
         Ok(new_response(&bank, supply))
     }
 
+    pub fn get_multi_token_holders_number(
+        &self,
+        mints: &[Pubkey],
+        commitment: Option<CommitmentConfig>,
+    ) -> Result<RpcResponse<Vec<u64>>> {
+        if mints.len() > 100 {
+            return Err(Error::invalid_params("Too many mints".to_string()));
+        };
+
+        let bank = self.bank(commitment);
+        let mut token_holders_counts = Vec::with_capacity(mints.len());
+        for mint in mints {
+            let (mint_owner, _data) = get_mint_owner_and_additional_data(&bank, mint)?;
+            if !is_known_spl_token_id(&mint_owner) {
+                return Err(Error::invalid_params(
+                    "Invalid param: not a Token mint".to_string(),
+                ));
+            }
+
+            let token_balances = self.get_filtered_spl_token_accounts_by_mint(
+                &bank,
+                &mint_owner,
+                mint,
+                vec![],
+                true,
+            )?;
+
+            let token_holders_count = token_balances
+                .iter()
+                .filter(|(_, account)| {
+                    let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
+                        .map(|account| account.base.amount)
+                        .unwrap_or(0);
+
+                    amount > 0
+                })
+                .count();
+
+            token_holders_counts.push(token_holders_count as u64);
+        }
+        Ok(new_response(&bank, token_holders_counts))
+    }
+
+    pub fn get_token_holders_number(
+        &self,
+        mint: &Pubkey,
+        commitment: Option<CommitmentConfig>,
+    ) -> Result<RpcResponse<u64>> {
+        let bank = self.bank(commitment);
+        let (mint_owner, _data) = get_mint_owner_and_additional_data(&bank, mint)?;
+        if !is_known_spl_token_id(&mint_owner) {
+            return Err(Error::invalid_params(
+                "Invalid param: not a Token mint".to_string(),
+            ));
+        }
+
+        let token_balances =
+            self.get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, mint, vec![], true)?;
+
+        let token_holders_count = token_balances
+            .iter()
+            .filter(|(_, account)| {
+                let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
+                    .map(|account| account.base.amount)
+                    .unwrap_or(0);
+
+                amount > 0
+            })
+            .count();
+
+        Ok(new_response(&bank, token_holders_count as u64))
+    }
+
+    pub fn get_token_top_holders(
+        &self,
+        mint: &Pubkey,
+        limit: usize,
+        commitment: Option<CommitmentConfig>,
+    ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>> {
+        if limit > 1000 {
+            return Err(Error::invalid_params("Limit too large".to_string()));
+        };
+        let bank = self.bank(commitment);
+        let (mint_owner, data) = get_mint_owner_and_additional_data(&bank, mint)?;
+        if !is_known_spl_token_id(&mint_owner) {
+            return Err(Error::invalid_params(
+                "Invalid param: not a Token mint".to_string(),
+            ));
+        }
+
+        let mut token_holders = BinaryHeap::<Reverse<(u64, Pubkey, Pubkey)>>::with_capacity(limit);
+        for (address, account) in
+            self.get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, mint, vec![], true)?
+        {
+            let (amount, owner) = StateWithExtensions::<TokenAccount>::unpack(account.data())
+                .map(|account| (account.base.amount, account.base.owner))
+                .unwrap_or((0, Pubkey::default()));
+            let new_entry = (amount, owner, address);
+            if amount == 0 {
+                continue;
+            }
+            if token_holders.len() >= limit {
+                let Reverse(entry) = token_holders
+                    .peek()
+                    .expect("BinaryHeap::peek should succeed when len > 0");
+                if *entry >= new_entry {
+                    continue;
+                }
+                token_holders.pop();
+            }
+            token_holders.push(Reverse(new_entry));
+        }
+
+        let token_holders = token_holders
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse((amount, owner, address))| {
+                Ok(RpcTokenAccountHolder {
+                    owner: owner.to_string(),
+                    address: address.to_string(),
+                    amount: token_amount_to_ui_amount_v2(amount, &data),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(new_response(&bank, token_holders))
+    }
+
     pub fn get_token_largest_accounts(
         &self,
         mint: &Pubkey,
@@ -3162,6 +3290,31 @@ pub mod rpc_accounts_scan {
         // See https://github.com/solana-labs/solana-program-library/releases/tag/token-v2.0.0 for
         // program details
 
+        #[rpc(meta, name = "getTokenTopHolders")]
+        fn get_token_top_holders(
+            &self,
+            meta: Self::Metadata,
+            mint_str: String,
+            limit: usize,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>>;
+
+        #[rpc(meta, name = "getMultiTokenHoldersNumber")]
+        fn get_multi_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_strs: Vec<String>,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<u64>>>;
+
+        #[rpc(meta, name = "getTokenHoldersNumber")]
+        fn get_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_str: String,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<u64>>;
+
         #[rpc(meta, name = "getTokenLargestAccounts")]
         fn get_token_largest_accounts(
             &self,
@@ -3241,6 +3394,52 @@ pub mod rpc_accounts_scan {
         ) -> Result<RpcResponse<RpcSupply>> {
             debug!("get_supply rpc request received");
             Ok(meta.get_supply(config)?)
+        }
+
+        fn get_multi_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_strs: Vec<String>,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<u64>>> {
+            debug!(
+                "get_token_holders_number rpc request received: {:?}",
+                mint_strs
+            );
+            let mints = mint_strs
+                .into_iter()
+                .map(|mint_str| verify_pubkey(&mint_str))
+                .collect::<Result<Vec<Pubkey>>>()?;
+            meta.get_multi_token_holders_number(&mints, commitment)
+        }
+
+        fn get_token_holders_number(
+            &self,
+            meta: Self::Metadata,
+            mint_str: String,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<u64>> {
+            debug!(
+                "get_token_holders_number rpc request received: {:?}",
+                mint_str
+            );
+            let mint = verify_pubkey(&mint_str)?;
+            meta.get_token_holders_number(&mint, commitment)
+        }
+
+        fn get_token_top_holders(
+            &self,
+            meta: Self::Metadata,
+            mint_str: String,
+            limit: usize,
+            commitment: Option<CommitmentConfig>,
+        ) -> Result<RpcResponse<Vec<RpcTokenAccountHolder>>> {
+            debug!(
+                "get_token_top_holders rpc request received: {:?}, limit: {:?}",
+                mint_str, limit
+            );
+            let mint = verify_pubkey(&mint_str)?;
+            meta.get_token_top_holders(&mint, limit, commitment)
         }
 
         fn get_token_largest_accounts(
