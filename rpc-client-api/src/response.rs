@@ -445,6 +445,15 @@ pub enum StakeActivationState {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct RpcTokenAccountHolder {
+    pub owner: String,
+    pub address: String,
+    #[serde(flatten)]
+    pub amount: UiTokenAmount,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RpcTokenAccountBalance {
     pub address: String,
     #[serde(flatten)]
